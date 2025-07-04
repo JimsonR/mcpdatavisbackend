@@ -1,6 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 
-mcp=FastMCP("Math")
+mcp=FastMCP("Math", port = 8001)
 
 @mcp.tool()
 def add(a:int,b:int)->int:
@@ -19,4 +19,4 @@ def multiple(a:int,b:int)-> int:
 #Use standard input/output (stdin and stdout) to receive and respond to tool function calls.
 
 if __name__=="__main__":
-    mcp.run(transport="stdio")
+    mcp.run(transport="streamable-http")

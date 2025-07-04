@@ -1,0 +1,10 @@
+servers:
+  math:
+    transport: streamable_http
+    url: http://localhost:8001/mcp
+  weather:
+    transport: streamable_http
+    url: http://localhost:8000/mcp
+  ds:
+    transport: streamable_http
+    url: http://localhost:8003/mcp
