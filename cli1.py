@@ -169,67 +169,184 @@ async def llm_chat(req: ChatRequest):
 @app.post("/llm/agent")
 async def llm_agent(req: ChatRequest):
     servers = get_mcp_servers()
-    client = MultiServerMCPClient(servers)
-    tools = await client.get_tools()
-    agent = create_react_agent(llm, tools)
-    # Build message list: history + new message
-    messages = []
-    if req.history:
-        for m in req.history:
-            if m["role"] == "user":
-                messages.append(HumanMessage(content=m["content"]))
-            elif m["role"] == "assistant":
-                messages.append(AIMessage(content=m["content"]))
-    messages.append(HumanMessage(content=req.message))
-    result = await agent.ainvoke({"messages": messages})
-    return {"response": result['messages'][-1].content}
+    
+    # Safety check: ensure we have servers configured
+    if not servers:
+        return {"response": "No MCP servers configured.", "error": True}
+    
+    try:
+        # Filter out unreachable servers
+        reachable_servers = {}
+        for server_name, server_config in servers.items():
+            try:
+                # Quick health check for each server
+                async with Client(server_config["url"]) as client:
+                    await client.list_tools()  # Test if server is reachable
+                    reachable_servers[server_name] = server_config
+            except Exception as e:
+                print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
+                continue
+        
+        if not reachable_servers:
+            return {"response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", "error": True}
+        
+        print(f"Using {len(reachable_servers)} reachable servers: {list(reachable_servers.keys())}")
+        
+        client = MultiServerMCPClient(reachable_servers)
+        tools = await client.get_tools()
+        
+        # Safety check: ensure we have tools
+        if not tools:
+            return {"response": "No tools available from reachable MCP servers.", "error": True}
+        
+        agent = create_react_agent(llm, tools)
+        
+        # Build message list: history + new message with context management
+        messages = []
+        if req.history:
+            # Limit history to last 10 messages to prevent context overflow
+            recent_history = req.history[-10:] if len(req.history) > 10 else req.history
+            for m in recent_history:
+                if m["role"] == "user":
+                    messages.append(HumanMessage(content=m["content"]))
+                elif m["role"] == "assistant":
+                    messages.append(AIMessage(content=m["content"]))
+        messages.append(HumanMessage(content=req.message))
+        
+        # Add recursion limit and timeout
+        result = await agent.ainvoke(
+            {"messages": messages},
+            config={
+                "recursion_limit": 35,  # Further reduce to 5 to prevent context overflow
+                "max_execution_time": 30  # Reduce timeout to 30 seconds
+            }
+        )
+        return {"response": result['messages'][-1].content}
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Agent error: {error_msg}")
+        if "recursion" in error_msg.lower():
+            return {"response": "Agent hit recursion limit. The task may be too complex or tools are failing repeatedly.", "error": True}
+        return {"response": f"Agent error: {error_msg}", "error": True}
 
     
 @app.post("/llm/agent-detailed")
-async def llm_agent(req: ChatRequest):
+async def llm_agent_detailed(req: ChatRequest):
     servers = get_mcp_servers()
-    client = MultiServerMCPClient(servers)
-    tools = await client.get_tools()
-    agent = create_react_agent(llm, tools)
-    # Build message list: history + new message
-    messages = []
-    if req.history:
-        for m in req.history:
-            if m["role"] == "user":
-                messages.append(HumanMessage(content=m["content"]))
-            elif m["role"] == "assistant":
-                messages.append(AIMessage(content=m["content"]))
-    messages.append(HumanMessage(content=req.message))
-    result = await agent.ainvoke({"messages": messages})
     
-    # Extract tool execution details from the conversation
-    tool_executions = []
-    for message in result['messages']:
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            for tool_call in message.tool_calls:
-                tool_executions.append({
-                    "tool_name": tool_call.get("name", "unknown"),
-                    "arguments": tool_call.get("args", {}),
-                    "id": tool_call.get("id", "unknown")
-                })
-        elif hasattr(message, 'type') and message.type == "tool":
-            tool_executions.append({
-                "tool_response": getattr(message, 'content', 'No content'),
-                "tool_call_id": getattr(message, 'tool_call_id', 'unknown')
-            })
+    # Safety check: ensure we have servers configured
+    if not servers:
+        return {
+            "response": "No MCP servers configured.", 
+            "error": True,
+            "tool_executions": [],
+            "full_conversation": []
+        }
     
-    return {
-        "response": result['messages'][-1].content,
-        "tool_executions": tool_executions,
-        "full_conversation": [
-            {
-                "type": getattr(m, 'type', 'unknown'),
-                "content": getattr(m, 'content', str(m)),
-                "role": getattr(m, 'role', 'unknown') if hasattr(m, 'role') else None
+    try:
+        # Filter out unreachable servers
+        reachable_servers = {}
+        for server_name, server_config in servers.items():
+            try:
+                # Quick health check for each server
+                async with Client(server_config["url"]) as client:
+                    await client.list_tools()  # Test if server is reachable
+                    reachable_servers[server_name] = server_config
+            except Exception as e:
+                print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
+                continue
+        
+        if not reachable_servers:
+            return {
+                "response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", 
+                "error": True,
+                "tool_executions": [],
+                "full_conversation": []
             }
-            for m in result['messages']
-        ]
-    }
+        
+        print(f"Using {len(reachable_servers)} reachable servers: {list(reachable_servers.keys())}")
+        
+        client = MultiServerMCPClient(reachable_servers)
+        tools = await client.get_tools()
+        
+        # Safety check: ensure we have tools
+        if not tools:
+            return {
+                "response": "No tools available from reachable MCP servers.", 
+                "error": True,
+                "tool_executions": [],
+                "full_conversation": []
+            }
+        
+        agent = create_react_agent(llm, tools)
+        
+        # Build message list: history + new message with context management
+        messages = []
+        if req.history:
+            # Limit history to last 10 messages to prevent context overflow
+            recent_history = req.history[-10:] if len(req.history) > 10 else req.history
+            for m in recent_history:
+                if m["role"] == "user":
+                    messages.append(HumanMessage(content=m["content"]))
+                elif m["role"] == "assistant":
+                    messages.append(AIMessage(content=m["content"]))
+        messages.append(HumanMessage(content=req.message))
+        
+        # Add recursion limit and timeout
+        result = await agent.ainvoke(
+            {"messages": messages},
+            config={
+                "recursion_limit": 30,  # Further reduce to 5 to prevent context overflow
+                "max_execution_time": 30  # Reduce timeout to 30 seconds
+            }
+        )
+        
+        # Extract tool execution details from the conversation
+        tool_executions = []
+        for message in result['messages']:
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                for tool_call in message.tool_calls:
+                    tool_executions.append({
+                        "tool_name": tool_call.get("name", "unknown"),
+                        "arguments": tool_call.get("args", {}),
+                        "id": tool_call.get("id", "unknown")
+                    })
+            elif hasattr(message, 'type') and message.type == "tool":
+                tool_executions.append({
+                    "tool_response": getattr(message, 'content', 'No content'),
+                    "tool_call_id": getattr(message, 'tool_call_id', 'unknown')
+                })
+        
+        return {
+            "response": result['messages'][-1].content,
+            "tool_executions": tool_executions,
+            "full_conversation": [
+                {
+                    "type": getattr(m, 'type', 'unknown'),
+                    "content": getattr(m, 'content', str(m)),
+                    "role": getattr(m, 'role', 'unknown') if hasattr(m, 'role') else None
+                }
+                for m in result['messages']
+            ]
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Agent detailed error: {error_msg}")
+        if "recursion" in error_msg.lower():
+            return {
+                "response": "Agent hit recursion limit. The task may be too complex or tools are failing repeatedly.", 
+                "error": True,
+                "tool_executions": [],
+                "full_conversation": []
+            }
+        return {
+            "response": f"Agent error: {error_msg}", 
+            "error": True,
+            "tool_executions": [],
+            "full_conversation": []
+        }
 
 @app.get("/langchain/list-tools")
 async def langchain_list_tools(servers: str = None):
@@ -238,7 +355,22 @@ async def langchain_list_tools(servers: str = None):
         selected = {k: v for k, v in all_servers.items() if k in servers.split(",")}
     else:
         selected = all_servers
-    client = MultiServerMCPClient(selected)
+    
+    # Filter out unreachable servers
+    reachable_servers = {}
+    for server_name, server_config in selected.items():
+        try:
+            async with Client(server_config["url"]) as client:
+                await client.list_tools()  # Test if server is reachable
+                reachable_servers[server_name] = server_config
+        except Exception as e:
+            print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
+            continue
+    
+    if not reachable_servers:
+        return {"error": "No reachable MCP servers found"}
+    
+    client = MultiServerMCPClient(reachable_servers)
     tools = await client.get_tools()
     # Convert each tool to a dict (if needed)
     serializable_tools = []
