@@ -217,7 +217,7 @@ async def llm_agent(req: ChatRequest):
         result = await agent.ainvoke(
             {"messages": messages},
             config={
-                "recursion_limit": 35,  # Further reduce to 5 to prevent context overflow
+                "recursion_limit": 5,  # Further reduce to 5 to prevent context overflow
                 "max_execution_time": 30  # Reduce timeout to 30 seconds
             }
         )
@@ -298,7 +298,7 @@ async def llm_agent_detailed(req: ChatRequest):
             {"messages": messages},
             config={
                 "recursion_limit": 30,  # Further reduce to 5 to prevent context overflow
-                "max_execution_time": 30  # Reduce timeout to 30 seconds
+                "max_execution_time": 60  # Reduce timeout to 30 seconds
             }
         )
         

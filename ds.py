@@ -433,26 +433,26 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             }
         else:
             return {"error": "For line plot, provide either (column) or (x, y)"}
-    elif plot_type == "bar" and x and y:
-        grouped = df.groupby(x)[y].sum().sort_values(ascending=False)
-        grouped = grouped.head(max_points)
-        return {
-            "type": "bar",
-            "bars": [{"label": str(idx), "value": float(val)} for idx, val in grouped.items()],
-            "title": title or f"{y} by {x}",
-            "x": x,
-            "y": y
-        }
-    elif plot_type == "pie" and column:
-        value_counts = df[column].value_counts().head(max_points)
-        return {
-            "type": "pie",
-            "slices": [
-                {"label": str(idx), "value": int(val)} for idx, val in value_counts.items()
-            ],
-            "title": title or f"Pie chart of {column}",
-            "column": column
-        }
+    elif plot_type == "bar" and x:
+        if y:
+            grouped = df.groupby(x)[y].sum().sort_values(ascending=False).head(max_points)
+            bars = [{"label": str(idx), "value": float(val)} for idx, val in grouped.items()]
+            return {"type": "bar", "bars": bars, "title": title or f"{y} by {x}", "x": x, "y": y}
+        else:
+            counts = df[x].value_counts().head(max_points)
+            bars = [{"label": str(idx), "value": int(val)} for idx, val in counts.items()]
+            return {"type": "bar", "bars": bars, "title": title or f"Count by {x}", "x": x}
+
+    elif plot_type == "pie":
+        if x and y:
+            grouped = df.groupby(x)[y].sum().sort_values(ascending=False).head(max_points)
+            slices = [{"label": str(idx), "value": float(val)} for idx, val in grouped.items()]
+            return {"type": "pie", "slices": slices, "title": title or f"{y} by {x}", "x": x, "y": y}
+        elif column or x:
+            col = column or x
+            value_counts = df[col].value_counts().head(max_points)
+            slices = [{"label": str(idx), "value": int(val)} for idx, val in value_counts.items()]
+            return {"type": "pie", "slices": slices, "title": title or f"Pie chart of {col}", "column": col}
     elif plot_type == "area":
         # Area chart: support multi-series by a category column (e.g., PRODUCTLINE)
         if x and y:
@@ -576,9 +576,9 @@ def list_supported_chart_types() -> list:
     ]
     return [TextContent(type="text", text="Supported chart types: " + ", ".join(chart_types))]
 
-# class PreviewDataFrameArgs(BaseModel):
-#     df_name: str
-#     n: int = 5  # Number of rows to preview
+class PreviewDataFrameArgs(BaseModel):
+    df_name: str
+    n: int = 5  # Number of rows to preview
 
 # @mcp.tool()
 # def preview_dataframe(args: PreviewDataFrameArgs) -> list:
@@ -592,6 +592,56 @@ def list_supported_chart_types() -> list:
 #     preview = df.head(n).to_string(index=False)
 #     return [TextContent(type="text", text=f"Preview of '{df_name}' (first {n} rows):\n{preview}")]
 
+
+
+# --- Table preview resource pattern ---
+_last_table_preview = None  # Global cache for last prepared table preview
+
+
+class PrepareTableResourceArgs(BaseModel):
+    df_name: str
+    n: int = 5
+    title: str = None
+
+@mcp.tool()
+def prepare_table_resource(args: PrepareTableResourceArgs) -> list:
+    """Prepare a DataFrame preview for the frontend resource in CSV format. Does NOT return the table to the LLM."""
+    global _dataframes, _last_table_preview
+    df_name = args.df_name
+    n = args.n
+    title = args.title if args.title else f"{df_name} (first {n} rows)"
+    if df_name not in _dataframes:
+        return [TextContent(type="text", text=f"DataFrame '{df_name}' not found. Available: {list(_dataframes.keys())}")]
+    df = _dataframes[df_name]
+    csv_data = df.head(n).to_csv(index=False)
+    _last_table_preview = None  # Reset previous preview
+    _last_table_preview = {
+        "title": title,
+        "csv": csv_data
+    }
+    return [TextContent(type="text", text=f"Table preview for '{df_name}' ({n} rows, CSV format) prepared. Fetch via resource.")]
+
+@mcp.resource("data-exploration://table-preview", mime_type="application/json")
+def table_preview_resource():
+    """Return the last prepared table preview (for frontend display only)."""
+    global _last_table_preview
+    if _last_table_preview is None:
+        return {"error": "No table preview prepared. Use the prepare_table_resource tool first."}
+    return _last_table_preview
+# @mcp.tool()
+# def preview_dataframe(args: PreviewDataFrameArgs) -> list:
+#     """Preview the first n rows of a DataFrame in memory, but do NOT return the table to the LLM."""
+#     global _dataframes
+#     df_name = args.df_name
+#     n = args.n
+#     if df_name not in _dataframes:
+#         return [TextContent(type="text", text=f"DataFrame '{df_name}' not found. Available: {list(_dataframes.keys())}")]
+#     df = _dataframes[df_name]
+#     # Print preview to server log for developer/debugging
+#     print(f"Preview of '{df_name}' (first {n} rows):\n{df.head(n).to_string(index=False)}")
+#     # Return only summary to LLM
+#     summary = f"DataFrame '{df_name}': shape={df.shape}, columns={list(df.columns)}, dtypes={dict(df.dtypes)}"
+#     return [TextContent(type="text", text=summary + "\n[Preview printed to server log, not included in LLM response.]")]
 
 ### Data Exploration Tools Description & Schema
 _dataframes: Dict[str, pd.DataFrame] = {}
@@ -694,12 +744,37 @@ Focus your analysis on: **{topic}**
 
 ## Important Guidelines:
 - Always call `list_dataframes` before using `run_script` or `create_visualization`
-- Keep individual script outputs manageable (limit large results)
+- Use `list_supported_chart_types` to discover available chart types before `create_visualization`
 - Focus on the most relevant insights for the given topic
 - Use visualizations to enhance understanding
 
 Begin by loading the CSV file and exploring its basic structure.
 """
+# - Keep individual script outputs manageable (limit large results)
+
+
+# PROMPT_TEMPLATE = """
+# You are a professional Data Scientist. Perform exploratory data analysis on the dataset at this path:
+
+# <csv_path>
+# {csv_path}
+# </csv_path>
+
+# Focus your analysis on: **{topic}**
+
+# ## Your Task (Stepwise):
+# 1. Load the dataset using `load_csv`.
+# 2. Preview the first 5 rows using `preview_dataframe`.
+# 3. List all DataFrames in memory using `list_dataframes`.
+
+# **STOP after these steps and wait for further instructions.**
+
+# Once confirmed, proceed to:
+# 4. Run analysis scripts with `run_script`.
+# 5. Create visualizations with `create_visualization`.
+
+# **Always keep each request to 3–4 tool calls maximum to avoid step-limit errors.**
+# """
 
 #    d. Render the results returned by the run_script tool as a chart using plotly.js (prefer loading from cdnjs.cloudflare.com). Do not use react or recharts, and do not read the original CSV file directly. Provide the plotly.js code to generate the chart.
 
@@ -779,19 +854,7 @@ def schema_resource():
             "preview": df.head(5).to_dict(orient="records")
         }
     return schema
-# Resource: Supported chart types
-@mcp.resource("data-exploration://chart-types", mime_type="application/json")
-def chart_types_resource():
-    """List of supported chart types for visualization."""
-    print("[RESOURCE] chart_types_resource called")
-    return [
-        "histogram",
-        "line",
-        "bar",
-        "pie",
-        "area",
-        "scatter"
-    ]
+
 # Keep notes resource as well
 @mcp.resource("data-exploration://notes", mime_type="text/plain")
 def notes_resource():
