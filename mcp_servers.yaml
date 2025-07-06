@@ -8,3 +8,6 @@ servers:
   ds:
     transport: streamable_http
     url: http://localhost:8003/mcp
+  dexdb:
+    transport: streamable_http
+    url: http://localhost:8004/mcp
