@@ -174,6 +174,8 @@ class CreateVisualizationArgs(BaseModel):
     title: Optional[str] = None
     bins: int = 20
     max_points: int = 100
+    max_categories: int = 20  # For area/stacked charts
+    auto_limit: bool = True  # If True, fallback to top-N
 
 # def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, bins=20, max_points=100):
 #     if plot_type == "stacked_bar" and x and y:
@@ -727,6 +729,21 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
     elif plot_type == "area":
         # Area chart: robust, scalable split-by/category support
         if x and y:
+            import re
+            max_categories = 20
+            auto_limit = True
+            # Try to get from args if passed (for backward compatibility)
+            import inspect
+            frame = inspect.currentframe()
+            outer = inspect.getouterframes(frame)
+            for f in outer:
+                if 'args' in f.frame.f_locals:
+                    args = f.frame.f_locals['args']
+                    if hasattr(args, 'max_categories'):
+                        max_categories = getattr(args, 'max_categories', 20)
+                    if hasattr(args, 'auto_limit'):
+                        auto_limit = getattr(args, 'auto_limit', True)
+                    break
             # 1. If column is provided, require it to be valid, else error (do not infer)
             if column is not None:
                 if column not in df.columns:
@@ -740,7 +757,6 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             else:
                 split_column = None
                 # 2. Try to infer from title (e.g., "split by ..." or "per ...")
-                import re
                 if title:
                     m = re.search(r"split by ([\w_]+)", title, re.IGNORECASE)
                     if not m:
@@ -760,7 +776,7 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
                     best_card = None
                     for col in candidates:
                         nunique = df_sample[col].nunique(dropna=True)
-                        if 2 <= nunique <= 20:
+                        if 2 <= nunique <= max_categories:
                             if best is None or nunique < best_card:
                                 best = col
                                 best_card = nunique
@@ -769,13 +785,86 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             # If a valid split_column is found, check its cardinality on the full df (with a hard cap)
             if split_column and split_column in df.columns:
                 cardinality = df[split_column].nunique(dropna=True)
-                if cardinality > 20:
-                    return {
-                        "error": f"Split-by column '{split_column}' has too many unique values ({cardinality}). Please specify a column with fewer categories for area chart.",
-                        "x": x,
-                        "y": y,
-                        "original_size": original_size
-                    }
+                if cardinality > max_categories:
+                    if auto_limit:
+                        # Fallback: use top-N categories
+                        top_n = max_categories
+                        top_categories = df.groupby(split_column)[y].sum().nlargest(top_n).index
+                        df_filtered = df[df[split_column].isin(top_categories)]
+                        groupby_sample_size = min(10000, len(df_filtered))
+                        df_group = df_filtered.sample(n=groupby_sample_size, random_state=42) if len(df_filtered) > groupby_sample_size else df_filtered
+                        grouped = df_group[[x, split_column, y]].dropna().groupby([x, split_column])[y].sum().reset_index()
+                        area_series = {}
+                        for series_name in grouped[split_column].unique():
+                            series_data = grouped[grouped[split_column] == series_name]
+                            x_vals = series_data[x].tolist()
+                            y_vals = series_data[y].tolist()
+                            if len(x_vals) > max_points:
+                                step = max(1, len(x_vals) // max_points)
+                                x_vals = x_vals[::step]
+                                y_vals = y_vals[::step]
+                            area_series[str(series_name)] = [
+                                {"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)
+                            ]
+                        return {
+                            "type": "area",
+                            "series": area_series,
+                            "title": f"{title or f'Area chart of {y} by {x}'} (Top {top_n})",
+                            "x": x,
+                            "y": y,
+                            "series_column": split_column,
+                            "truncated": True,
+                            "total_categories": cardinality,
+                            "showing_categories": top_n,
+                            "sampled": True if len(df_filtered) > groupby_sample_size else False,
+                            "original_size": original_size
+                        }
+                    else:
+                        # Return error and alternatives
+                        return {
+                            "error": f"Split-by column '{split_column}' has too many unique values ({cardinality}). Please specify a column with fewer categories for area chart.",
+                            "x": x,
+                            "y": y,
+                            "original_size": original_size,
+                            "alternatives": [
+                                {
+                                    "plot_type": "area",
+                                    "description": f"Area chart showing top {max_categories} {split_column}s only",
+                                    "params": {
+                                        "df_name": None,  # frontend should fill
+                                        "plot_type": "area",
+                                        "x": x,
+                                        "y": y,
+                                        "column": split_column,
+                                        "title": f"{title} (Top {max_categories})",
+                                        "auto_limit": True,
+                                        "max_categories": max_categories
+                                    }
+                                },
+                                {
+                                    "plot_type": "line",
+                                    "description": "Aggregated trend without product split",
+                                    "params": {
+                                        "df_name": None,
+                                        "plot_type": "line",
+                                        "x": x,
+                                        "y": y,
+                                        "title": f"Total {y} Over Time"
+                                    }
+                                },
+                                {
+                                    "plot_type": "bar",
+                                    "description": f"Top {max_categories} {split_column}s by total {y}",
+                                    "params": {
+                                        "df_name": None,
+                                        "plot_type": "bar",
+                                        "x": split_column,
+                                        "y": y,
+                                        "title": f"Top {split_column}s by {y}"
+                                    }
+                                }
+                            ]
+                        }
                 # For large DataFrames, sample for groupby as well
                 groupby_sample_size = min(10000, len(df))
                 df_group = df.sample(n=groupby_sample_size, random_state=42) if len(df) > groupby_sample_size else df
