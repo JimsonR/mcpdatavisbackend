@@ -111,10 +111,18 @@ def list_dataframes() -> list:
     
     result = "=== DATAFRAMES IN MEMORY ===\n\n"
     for name, df in _dataframes.items():
-        result += f"DataFrame: {name}\n"
-        result += f"  Shape: {df.shape}\n"
-        result += f"  Columns: {list(df.columns)}\n\n"
-    
+        if isinstance(df, pd.DataFrame):
+            result += f"DataFrame: {name}\n"
+            result += f"  Type: DataFrame\n"
+            result += f"  Shape: {df.shape}\n"
+            result += f"  Columns: {list(df.columns)}\n\n"
+        elif isinstance(df, pd.Series):
+            result += f"Series: {name}\n"
+            result += f"  Type: Series\n"
+            result += f"  Shape: {df.shape}\n"
+            result += f"  Dtype: {df.dtype}\n\n"
+        else:
+            result += f"Unknown type for: {name} ({type(df)})\n\n"
     result += f"Use these names in scripts: {', '.join(_dataframes.keys())}"
     return [TextContent(type="text", text=result)]
 
@@ -340,8 +348,215 @@ class CreateVisualizationArgs(BaseModel):
 #         }
 #     else:
 #         return {"error": "Supported: histogram (column), line (column or x/y), bar (x, y), stacked_bar (x, y[list]), pie (column), area (x, y), scatter (x, y), heatmap (x, y), boxplot (y)"}
+# @mcp.tool()
+# def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, bins=20, max_points=100):
+#     if plot_type == "stacked_bar" and x and y:
+#         # y can be a list of columns to stack
+#         y_cols = y if isinstance(y, list) else [y]
+#         data = df[[x] + y_cols].dropna()
+#         grouped = data.groupby(x)[y_cols].sum().head(max_points)
+#         bars = {col: grouped[col].tolist() for col in y_cols}
+#         x_labels = grouped.index.tolist()
+#         return {
+#             "type": "stacked_bar",
+#             "x": x_labels,
+#             "bars": bars,
+#             "y_cols": y_cols,
+#             "title": title or f"Stacked Bar of {y_cols} by {x}"
+#         }
+#     elif plot_type == "heatmap" and x and y:
+#         # Check if there's a third column to aggregate, otherwise count
+#         if column:
+#             # Use the specified column as values to aggregate
+#             pivot = pd.pivot_table(df, index=y, columns=x, values=column, aggfunc="sum", fill_value=0)
+#             title_default = f"Heatmap of {column} by {y} vs {x}"
+#         else:
+#             # Fallback to counting occurrences
+#             pivot = pd.pivot_table(df, index=y, columns=x, aggfunc="size", fill_value=0)
+#             title_default = f"Heatmap count of {y} vs {x}"
+        
+#         return {
+#             "type": "heatmap",
+#             "x": list(pivot.columns),
+#             "y": list(pivot.index),
+#             "z": pivot.values.tolist(),
+#             "title": title or title_default,
+#             "aggregated_column": column if column else None
+#         }
 
-def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, bins=20, max_points=100):
+#     elif plot_type == "box" or plot_type == "boxplot":
+#         # y can be a single column or list of columns
+#         y_cols = y if isinstance(y, list) else [y]
+#         box_data = {}
+#         for col in y_cols:
+#             if col in df.columns:
+#                 box_data[col] = df[col].dropna().tolist()
+#         return {
+#             "type": "boxplot",
+#             "columns": y_cols,
+#             "data": box_data,
+#             "title": title or f"Boxplot of {y_cols}"
+#         }
+#     elif plot_type == "histogram" and column:
+#         values = df[column].dropna().tolist()
+#         counts, bin_edges = np.histogram(values, bins=bins)
+#         return {
+#             "type": "histogram",
+#             "bins": [
+#                 {"range": [float(bin_edges[i]), float(bin_edges[i+1])], "count": int(counts[i])}
+#                 for i in range(len(counts))
+#             ],
+#             "title": title or f"Distribution of {column}",
+#             "column": column
+#         }
+#     elif plot_type == "line":
+#         # Support both (x, y) and (column) usage
+#         if x and y:
+#             data = df[[x, y]].dropna()
+#             x_vals = data[x].tolist()
+#             y_vals = data[y].tolist()
+#             if len(x_vals) > max_points:
+#                 step = max(1, len(x_vals) // max_points)
+#                 x_vals = x_vals[::step]
+#                 y_vals = y_vals[::step]
+#             return {
+#                 "type": "line",
+#                 "points": [{"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)],
+#                 "title": title or f"{y} vs {x}",
+#                 "x": x,
+#                 "y": y
+#             }
+#         elif column:
+#             y_data = df[column].dropna()
+#             x_data = y_data.index.tolist()
+#             if len(x_data) > max_points:
+#                 step = max(1, len(x_data) // max_points)
+#                 x_data = x_data[::step]
+#                 y_data = y_data.iloc[::step]
+#             return {
+#                 "type": "line",
+#                 "points": [{"x": str(x), "y": float(y)} for x, y in zip(x_data, y_data)],
+#                 "title": title or f"{column} Over Index",
+#                 "column": column
+#             }
+#         else:
+#             return {"error": "For line plot, provide either (column) or (x, y)"}
+#     elif plot_type == "bar" and x:
+#         if y:
+#             grouped = df.groupby(x)[y].sum().sort_values(ascending=False).head(max_points)
+#             bars = [{"label": str(idx), "value": float(val)} for idx, val in grouped.items()]
+#             return {"type": "bar", "bars": bars, "title": title or f"{y} by {x}", "x": x, "y": y}
+#         else:
+#             counts = df[x].value_counts().head(max_points)
+#             bars = [{"label": str(idx), "value": int(val)} for idx, val in counts.items()]
+#             return {"type": "bar", "bars": bars, "title": title or f"Count by {x}", "x": x}
+
+#     elif plot_type == "pie":
+#         if x and y:
+#             grouped = df.groupby(x)[y].sum().sort_values(ascending=False).head(max_points)
+#             slices = [{"label": str(idx), "value": float(val)} for idx, val in grouped.items()]
+#             return {"type": "pie", "slices": slices, "title": title or f"{y} by {x}", "x": x, "y": y}
+#         elif column or x:
+#             col = column or x
+#             value_counts = df[col].value_counts().head(max_points)
+#             slices = [{"label": str(idx), "value": int(val)} for idx, val in value_counts.items()]
+#             return {"type": "pie", "slices": slices, "title": title or f"Pie chart of {col}", "column": col}
+#     elif plot_type == "area":
+#         # Area chart: support multi-series by a category column (e.g., PRODUCTLINE)
+#         if x and y:
+#             # If 'column' is provided, treat it as the series key (e.g., PRODUCTLINE)
+#             if column and column in df.columns:
+#                 # Group by x and column, sum y
+#                 grouped = df[[x, column, y]].dropna().groupby([x, column])[y].sum().reset_index()
+#                 # Build a dict: {series_name: [{x, y}, ...]}
+#                 area_series = {}
+#                 for series_name in grouped[column].unique():
+#                     series_data = grouped[grouped[column] == series_name]
+#                     x_vals = series_data[x].tolist()
+#                     y_vals = series_data[y].tolist()
+#                     # Downsample if needed
+#                     if len(x_vals) > max_points:
+#                         step = max(1, len(x_vals) // max_points)
+#                         x_vals = x_vals[::step]
+#                         y_vals = y_vals[::step]
+#                     area_series[str(series_name)] = [
+#                         {"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)
+#                     ]
+#                 return {
+#                     "type": "area",
+#                     "series": area_series,
+#                     "title": title or f"Area chart of {y} by {x} per {column}",
+#                     "x": x,
+#                     "y": y,
+#                     "series_column": column
+#                 }
+#             else:
+#                 # Fallback: treat y as a list of columns (legacy behavior)
+#                 y_cols = y if isinstance(y, list) else [y]
+#                 data = df[[x] + y_cols].dropna()
+#                 x_vals = data[x].tolist()
+#                 area_series = {}
+#                 for y_col in y_cols:
+#                     y_vals = data[y_col].tolist()
+#                     if len(x_vals) > max_points:
+#                         step = max(1, len(x_vals) // max_points)
+#                         x_vals_ds = x_vals[::step]
+#                         y_vals_ds = y_vals[::step]
+#                     else:
+#                         x_vals_ds = x_vals
+#                         y_vals_ds = y_vals
+#                     area_series[y_col] = [{"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals_ds, y_vals_ds)]
+#                 return {
+#                     "type": "area",
+#                     "series": area_series,
+#                     "title": title or f"Area chart of {y} by {x}",
+#                     "x": x,
+#                     "y": y
+#                 }
+#         else:
+#             return {"error": "For area chart, provide x and y (y can be a list), and optionally column for series"}
+#     elif plot_type == "scatter" and x and y:
+#         data = df[[x, y]].dropna()
+#         x_vals = data[x].tolist()
+#         y_vals = data[y].tolist()
+#         if len(x_vals) > max_points:
+#             step = max(1, len(x_vals) // max_points)
+#             x_vals = x_vals[::step]
+#             y_vals = y_vals[::step]
+#         return {
+#             "type": "scatter",
+#             "points": [{"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)],
+#             "title": title or f"Scatterplot of {y} vs {x}",
+#             "x": x,
+#             "y": y
+#         }
+#     else:
+#         return {"error": "Supported: histogram (column), line (column or x/y), bar (x, y), stacked_bar (x, y[list]), pie (column), area (x, y), scatter (x, y), heatmap (x, y), boxplot (y)"}
+
+
+@mcp.tool()
+def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, bins=20, max_points=100, max_processing_rows=500000):
+    """
+    Extract plot data from DataFrame with intelligent sampling for large datasets.
+    
+    Args:
+        df: DataFrame to extract data from
+        plot_type: Type of plot to generate
+        x, y, column: Column names for plotting
+        title: Optional title for the plot
+        bins: Number of bins for histogram
+        max_points: Maximum points in final output
+        max_processing_rows: Maximum rows to process before sampling
+    """
+    
+    # Early sampling for large datasets to prevent memory issues
+    original_size = len(df)
+    if original_size > max_processing_rows:
+        print(f"Dataset large ({original_size:,} rows). Sampling {max_processing_rows:,} rows for processing...")
+        # Use systematic sampling to preserve patterns
+        step = max(1, original_size // max_processing_rows)
+        df = df.iloc[::step].copy()
+    
     if plot_type == "stacked_bar" and x and y:
         # y can be a list of columns to stack
         y_cols = y if isinstance(y, list) else [y]
@@ -354,7 +569,9 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             "x": x_labels,
             "bars": bars,
             "y_cols": y_cols,
-            "title": title or f"Stacked Bar of {y_cols} by {x}"
+            "title": title or f"Stacked Bar of {y_cols} by {x}",
+            "sampled": original_size > max_processing_rows,
+            "original_size": original_size
         }
     elif plot_type == "heatmap" and x and y:
         # Check if there's a third column to aggregate, otherwise count
@@ -367,13 +584,21 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             pivot = pd.pivot_table(df, index=y, columns=x, aggfunc="size", fill_value=0)
             title_default = f"Heatmap count of {y} vs {x}"
         
+        # Limit heatmap dimensions to prevent overwhelming output
+        if len(pivot.columns) > max_points:
+            pivot = pivot.iloc[:, :max_points]
+        if len(pivot.index) > max_points:
+            pivot = pivot.iloc[:max_points, :]
+        
         return {
             "type": "heatmap",
             "x": list(pivot.columns),
             "y": list(pivot.index),
             "z": pivot.values.tolist(),
             "title": title or title_default,
-            "aggregated_column": column if column else None
+            "aggregated_column": column if column else None,
+            "sampled": original_size > max_processing_rows,
+            "original_size": original_size
         }
 
     elif plot_type == "box" or plot_type == "boxplot":
@@ -382,15 +607,25 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
         box_data = {}
         for col in y_cols:
             if col in df.columns:
-                box_data[col] = df[col].dropna().tolist()
+                # For box plots, sample the data if too large
+                col_data = df[col].dropna()
+                if len(col_data) > max_processing_rows:
+                    col_data = col_data.sample(n=max_processing_rows, random_state=42)
+                box_data[col] = col_data.tolist()
         return {
             "type": "boxplot",
             "columns": y_cols,
             "data": box_data,
-            "title": title or f"Boxplot of {y_cols}"
+            "title": title or f"Boxplot of {y_cols}",
+            "sampled": original_size > max_processing_rows,
+            "original_size": original_size
         }
     elif plot_type == "histogram" and column:
-        values = df[column].dropna().tolist()
+        values = df[column].dropna()
+        # For histogram, we can work with more data since we're binning
+        if len(values) > max_processing_rows * 2:  # Allow more for histograms
+            values = values.sample(n=max_processing_rows * 2, random_state=42)
+        
         counts, bin_edges = np.histogram(values, bins=bins)
         return {
             "type": "histogram",
@@ -399,7 +634,9 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
                 for i in range(len(counts))
             ],
             "title": title or f"Distribution of {column}",
-            "column": column
+            "column": column,
+            "sampled": original_size > max_processing_rows * 2,
+            "original_size": original_size
         }
     elif plot_type == "line":
         # Support both (x, y) and (column) usage
@@ -416,7 +653,9 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
                 "points": [{"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)],
                 "title": title or f"{y} vs {x}",
                 "x": x,
-                "y": y
+                "y": y,
+                "sampled": original_size > max_processing_rows or len(data) > max_points,
+                "original_size": original_size
             }
         elif column:
             y_data = df[column].dropna()
@@ -429,7 +668,9 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
                 "type": "line",
                 "points": [{"x": str(x), "y": float(y)} for x, y in zip(x_data, y_data)],
                 "title": title or f"{column} Over Index",
-                "column": column
+                "column": column,
+                "sampled": original_size > max_processing_rows or len(y_data) > max_points,
+                "original_size": original_size
             }
         else:
             return {"error": "For line plot, provide either (column) or (x, y)"}
@@ -437,36 +678,113 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
         if y:
             grouped = df.groupby(x)[y].sum().sort_values(ascending=False).head(max_points)
             bars = [{"label": str(idx), "value": float(val)} for idx, val in grouped.items()]
-            return {"type": "bar", "bars": bars, "title": title or f"{y} by {x}", "x": x, "y": y}
+            return {
+                "type": "bar", 
+                "bars": bars, 
+                "title": title or f"{y} by {x}", 
+                "x": x, 
+                "y": y,
+                "sampled": original_size > max_processing_rows,
+                "original_size": original_size
+            }
         else:
             counts = df[x].value_counts().head(max_points)
             bars = [{"label": str(idx), "value": int(val)} for idx, val in counts.items()]
-            return {"type": "bar", "bars": bars, "title": title or f"Count by {x}", "x": x}
+            return {
+                "type": "bar", 
+                "bars": bars, 
+                "title": title or f"Count by {x}", 
+                "x": x,
+                "sampled": original_size > max_processing_rows,
+                "original_size": original_size
+            }
 
     elif plot_type == "pie":
         if x and y:
             grouped = df.groupby(x)[y].sum().sort_values(ascending=False).head(max_points)
             slices = [{"label": str(idx), "value": float(val)} for idx, val in grouped.items()]
-            return {"type": "pie", "slices": slices, "title": title or f"{y} by {x}", "x": x, "y": y}
+            return {
+                "type": "pie", 
+                "slices": slices, 
+                "title": title or f"{y} by {x}", 
+                "x": x, 
+                "y": y,
+                "sampled": original_size > max_processing_rows,
+                "original_size": original_size
+            }
         elif column or x:
             col = column or x
             value_counts = df[col].value_counts().head(max_points)
             slices = [{"label": str(idx), "value": int(val)} for idx, val in value_counts.items()]
-            return {"type": "pie", "slices": slices, "title": title or f"Pie chart of {col}", "column": col}
+            return {
+                "type": "pie", 
+                "slices": slices, 
+                "title": title or f"Pie chart of {col}", 
+                "column": col,
+                "sampled": original_size > max_processing_rows,
+                "original_size": original_size
+            }
     elif plot_type == "area":
-        # Area chart: support multi-series by a category column (e.g., PRODUCTLINE)
+        # Area chart: robust, scalable split-by/category support
         if x and y:
-            # If 'column' is provided, treat it as the series key (e.g., PRODUCTLINE)
-            if column and column in df.columns:
-                # Group by x and column, sum y
-                grouped = df[[x, column, y]].dropna().groupby([x, column])[y].sum().reset_index()
-                # Build a dict: {series_name: [{x, y}, ...]}
+            # 1. If column is provided, require it to be valid, else error (do not infer)
+            if column is not None:
+                if column not in df.columns:
+                    return {
+                        "error": f"Provided split-by column '{column}' not found in DataFrame columns.",
+                        "x": x,
+                        "y": y,
+                        "original_size": original_size
+                    }
+                split_column = column
+            else:
+                split_column = None
+                # 2. Try to infer from title (e.g., "split by ..." or "per ...")
+                import re
+                if title:
+                    m = re.search(r"split by ([\w_]+)", title, re.IGNORECASE)
+                    if not m:
+                        m = re.search(r"per ([\w_]+)", title, re.IGNORECASE)
+                    if m:
+                        candidate = m.group(1)
+                        for col in df.columns:
+                            if col == candidate or col.lower() == candidate.lower() or candidate.lower() in col.lower():
+                                split_column = col
+                                break
+                # 3. Data-driven: pick a categorical/object column (not x/y) with few unique values
+                if not split_column:
+                    sample_size = min(5000, len(df))
+                    df_sample = df.sample(n=sample_size, random_state=42) if len(df) > sample_size else df
+                    candidates = [col for col in df.columns if col not in [x, y] and (df[col].dtype == object or str(df[col].dtype).startswith("category"))]
+                    best = None
+                    best_card = None
+                    for col in candidates:
+                        nunique = df_sample[col].nunique(dropna=True)
+                        if 2 <= nunique <= 20:
+                            if best is None or nunique < best_card:
+                                best = col
+                                best_card = nunique
+                    if best:
+                        split_column = best
+            # If a valid split_column is found, check its cardinality on the full df (with a hard cap)
+            if split_column and split_column in df.columns:
+                cardinality = df[split_column].nunique(dropna=True)
+                if cardinality > 20:
+                    return {
+                        "error": f"Split-by column '{split_column}' has too many unique values ({cardinality}). Please specify a column with fewer categories for area chart.",
+                        "x": x,
+                        "y": y,
+                        "original_size": original_size
+                    }
+                # For large DataFrames, sample for groupby as well
+                groupby_sample_size = min(10000, len(df))
+                df_group = df.sample(n=groupby_sample_size, random_state=42) if len(df) > groupby_sample_size else df
+                grouped = df_group[[x, split_column, y]].dropna().groupby([x, split_column])[y].sum().reset_index()
                 area_series = {}
-                for series_name in grouped[column].unique():
-                    series_data = grouped[grouped[column] == series_name]
+                for series_name in grouped[split_column].unique():
+                    series_data = grouped[grouped[split_column] == series_name]
                     x_vals = series_data[x].tolist()
                     y_vals = series_data[y].tolist()
-                    # Downsample if needed
                     if len(x_vals) > max_points:
                         step = max(1, len(x_vals) // max_points)
                         x_vals = x_vals[::step]
@@ -477,10 +795,12 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
                 return {
                     "type": "area",
                     "series": area_series,
-                    "title": title or f"Area chart of {y} by {x} per {column}",
+                    "title": title or f"Area chart of {y} by {x} per {split_column}",
                     "x": x,
                     "y": y,
-                    "series_column": column
+                    "series_column": split_column,
+                    "sampled": True if len(df) > groupby_sample_size else False,
+                    "original_size": original_size
                 }
             else:
                 # Fallback: treat y as a list of columns (legacy behavior)
@@ -503,7 +823,9 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
                     "series": area_series,
                     "title": title or f"Area chart of {y} by {x}",
                     "x": x,
-                    "y": y
+                    "y": y,
+                    "sampled": original_size > max_processing_rows,
+                    "original_size": original_size
                 }
         else:
             return {"error": "For area chart, provide x and y (y can be a list), and optionally column for series"}
@@ -520,11 +842,12 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             "points": [{"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)],
             "title": title or f"Scatterplot of {y} vs {x}",
             "x": x,
-            "y": y
+            "y": y,
+            "sampled": original_size > max_processing_rows or len(data) > max_points,
+            "original_size": original_size
         }
     else:
         return {"error": "Supported: histogram (column), line (column or x/y), bar (x, y), stacked_bar (x, y[list]), pie (column), area (x, y), scatter (x, y), heatmap (x, y), boxplot (y)"}
-
 
 @mcp.tool()
 def create_visualization(args: CreateVisualizationArgs) -> list:
@@ -538,15 +861,36 @@ def create_visualization(args: CreateVisualizationArgs) -> list:
     if df_name not in _dataframes:
         return [TextContent(type="text", text=f"DataFrame '{df_name}' not found. Available: {list(_dataframes.keys())}")]
     df = _dataframes[df_name]
-    # Accept x and y as comma-separated string or list
+    plot_type = args.plot_type.lower() if isinstance(args.plot_type, str) else args.plot_type
+    # Validate and parse x/y for each chart type
     x = args.x
     y = args.y
-    if isinstance(x, str) and "," in x:
-        x = [col.strip() for col in x.split(",")]
-    if isinstance(y, str) and "," in y:
-        y = [col.strip() for col in y.split(",")]
-    plot_type = args.plot_type.lower() if isinstance(args.plot_type, str) else args.plot_type
-
+    # Only allow y as list for certain chart types
+    y_list_types = ["stacked_bar", "area"]
+    x_list_types = []  # No chart type currently supports x as a list
+    if plot_type in y_list_types:
+        if isinstance(y, str) and "," in y:
+            y = [col.strip() for col in y.split(",")]
+    else:
+        # For all other chart types, y must be a string (single column)
+        if isinstance(y, list):
+            return [TextContent(type="text", text=f"Error: Chart type '{plot_type}' does not support multiple y columns.")]
+        if isinstance(y, str) and "," in y:
+            y_split = [col.strip() for col in y.split(",")]
+            if len(y_split) > 1:
+                return [TextContent(type="text", text=f"Error: Chart type '{plot_type}' does not support multiple y columns.")]
+            y = y_split[0]
+    if plot_type in x_list_types:
+        if isinstance(x, str) and "," in x:
+            x = [col.strip() for col in x.split(",")]
+    else:
+        if isinstance(x, list):
+            return [TextContent(type="text", text=f"Error: Chart type '{plot_type}' does not support multiple x columns.")]
+        if isinstance(x, str) and "," in x:
+            x_split = [col.strip() for col in x.split(",")]
+            if len(x_split) > 1:
+                return [TextContent(type="text", text=f"Error: Chart type '{plot_type}' does not support multiple x columns.")]
+            x = x_split[0]
     plot_data = _extract_plot_data(
         df,
         plot_type,
@@ -559,6 +903,39 @@ def create_visualization(args: CreateVisualizationArgs) -> list:
     )
     return [TextContent(type="text", text=json.dumps(plot_data, indent=2))]
 
+
+# @mcp.tool()
+# def create_visualization(args: CreateVisualizationArgs) -> list:
+#     """Create visualization data for React frontend.
+#     This tool extracts data for various chart types from a DataFrame.
+#     Do list all supported chart types using list_supported_chart_types tool.
+#     Do list_dataframes tool before using this tool to ensure you know the available DataFrames and their columns.
+#     """
+#     global _dataframes
+#     df_name = args.df_name
+#     if df_name not in _dataframes:
+#         return [TextContent(type="text", text=f"DataFrame '{df_name}' not found. Available: {list(_dataframes.keys())}")]
+#     df = _dataframes[df_name]
+#     # Accept x and y as comma-separated string or list
+#     x = args.x
+#     y = args.y
+#     if isinstance(x, str) and "," in x:
+#         x = [col.strip() for col in x.split(",")]
+#     if isinstance(y, str) and "," in y:
+#         y = [col.strip() for col in y.split(",")]
+#     plot_type = args.plot_type.lower() if isinstance(args.plot_type, str) else args.plot_type
+
+#     plot_data = _extract_plot_data(
+#         df,
+#         plot_type,
+#         x=x,
+#         y=y,
+#         column=args.column,
+#         title=args.title,
+#         bins=args.bins,
+#         max_points=args.max_points
+#     )
+#     return [TextContent(type="text", text=json.dumps(plot_data, indent=2))]
 # Tool: List supported chart types
 @mcp.tool()
 def list_supported_chart_types() -> list:
