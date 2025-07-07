@@ -40,9 +40,20 @@ def save_mcp_servers(servers):
             # Maintain nested 'servers' structure
             yaml.safe_dump({"servers": servers}, f)
 
+
 # In-memory cache of servers (reload on every change)
+_cached_servers = None
+_cached_servers_mtime = None
 def get_mcp_servers():
-    return load_mcp_servers()
+    global _cached_servers, _cached_servers_mtime
+    try:
+        mtime = os.path.getmtime(MCP_SERVERS_YAML)
+    except Exception:
+        mtime = None
+    if _cached_servers is None or mtime != _cached_servers_mtime:
+        _cached_servers = load_mcp_servers()
+        _cached_servers_mtime = mtime
+    return _cached_servers
 
 # For backward compatibility, fallback to hardcoded if YAML missing
 def get_server_cfg(server):
@@ -93,6 +104,8 @@ async def call_mcp_tool(server: str, tool_name: str, arguments: dict):
         result = await client.call_tool(tool_name, arguments)
         return result
 
+
+# --- Optimized: Only check reachable servers on demand, not on every frontend load ---
 @app.get("/mcp/list-tools")
 async def list_mcp_tools(server: str):
     server_cfg = get_server_cfg(server)
@@ -348,29 +361,32 @@ async def llm_agent_detailed(req: ChatRequest):
             "full_conversation": []
         }
 
+
+# --- Optimized: Only check reachable servers when explicitly requested ---
 @app.get("/langchain/list-tools")
-async def langchain_list_tools(servers: str = None):
+async def langchain_list_tools(servers: str = None, only_reachable: bool = False):
     all_servers = get_mcp_servers()
     if servers:
         selected = {k: v for k, v in all_servers.items() if k in servers.split(",")}
     else:
         selected = all_servers
-    
-    # Filter out unreachable servers
-    reachable_servers = {}
-    for server_name, server_config in selected.items():
-        try:
-            async with Client(server_config["url"]) as client:
-                await client.list_tools()  # Test if server is reachable
-                reachable_servers[server_name] = server_config
-        except Exception as e:
-            print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
-            continue
-    
-    if not reachable_servers:
-        return {"error": "No reachable MCP servers found"}
-    
-    client = MultiServerMCPClient(reachable_servers)
+    if only_reachable:
+        # Filter out unreachable servers
+        reachable_servers = {}
+        for server_name, server_config in selected.items():
+            try:
+                async with Client(server_config["url"]) as client:
+                    await client.list_tools()  # Test if server is reachable
+                    reachable_servers[server_name] = server_config
+            except Exception as e:
+                print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
+                continue
+        if not reachable_servers:
+            return {"error": "No reachable MCP servers found"}
+        client = MultiServerMCPClient(reachable_servers)
+    else:
+        # Do not check reachability, just return all
+        client = MultiServerMCPClient(selected)
     tools = await client.get_tools()
     # Convert each tool to a dict (if needed)
     serializable_tools = []

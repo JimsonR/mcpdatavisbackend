@@ -551,12 +551,200 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
         max_processing_rows: Maximum rows to process before sampling
     """
     
+    # Lower threshold for area/complex charts
+    area_types = ["area", "heatmap"]
+    # Use a lower threshold for area/complex charts
+    if plot_type in area_types:
+        effective_max_processing_rows = min(50000, max_processing_rows)
+    else:
+        effective_max_processing_rows = max_processing_rows
+
     # Early sampling for large datasets to prevent memory issues
     original_size = len(df)
-    if original_size > max_processing_rows:
-        print(f"Dataset large ({original_size:,} rows). Sampling {max_processing_rows:,} rows for processing...")
+    # Try to use Dask or Polars for large DataFrames and expensive charts
+    dask_used = False
+    polars_used = False
+    dask_df = None
+    polars_df = None
+    # Only try for area/heatmap and large DataFrames
+    if plot_type in area_types and original_size > effective_max_processing_rows:
+        try:
+            import dask.dataframe as dd
+            dask_df = dd.from_pandas(df, npartitions=8)
+            dask_used = True
+        except ImportError:
+            try:
+                import polars as pl
+                polars_df = pl.from_pandas(df)
+                polars_used = True
+            except ImportError:
+                pass
+
+    if dask_used:
+        print(f"Using Dask for out-of-core processing: {original_size:,} rows.")
+        # For area/heatmap, sample after groupby to avoid memory issues
+        if plot_type == "heatmap" and x and y:
+            if column:
+                pivot = dask_df.pivot_table(index=y, columns=x, values=column, aggfunc="sum", fill_value=0).compute()
+                title_default = f"Heatmap of {column} by {y} vs {x}"
+            else:
+                # Fallback to counting occurrences
+                pivot = dask_df.groupby([y, x]).size().unstack(fill_value=0).compute()
+                title_default = f"Heatmap count of {y} vs {x}"
+            # Limit heatmap dimensions
+            if len(pivot.columns) > max_points:
+                pivot = pivot.iloc[:, :max_points]
+            if len(pivot.index) > max_points:
+                pivot = pivot.iloc[:max_points, :]
+            return {
+                "type": "heatmap",
+                "x": list(pivot.columns),
+                "y": list(pivot.index),
+                "z": pivot.values.tolist(),
+                "title": title or title_default,
+                "aggregated_column": column if column else None,
+                "sampled": True,
+                "original_size": original_size,
+                "out_of_core": "dask"
+            }
+        elif plot_type == "area" and x and y:
+            # Only support split_column (series) for Dask path
+            split_column = column if column and column in dask_df.columns else None
+            if split_column:
+                grouped = dask_df[[x, split_column, y]].dropna().groupby([x, split_column])[y].sum().reset_index().compute()
+                area_series = {}
+                for series_name in grouped[split_column].unique():
+                    series_data = grouped[grouped[split_column] == series_name]
+                    x_vals = series_data[x].tolist()
+                    y_vals = series_data[y].tolist()
+                    if len(x_vals) > max_points:
+                        step = max(1, len(x_vals) // max_points)
+                        x_vals = x_vals[::step]
+                        y_vals = y_vals[::step]
+                    area_series[str(series_name)] = [
+                        {"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)
+                    ]
+                return {
+                    "type": "area",
+                    "series": area_series,
+                    "title": title or f"Area chart of {y} by {x} per {split_column}",
+                    "x": x,
+                    "y": y,
+                    "series_column": split_column,
+                    "sampled": True,
+                    "original_size": original_size,
+                    "out_of_core": "dask"
+                }
+            else:
+                # Fallback: treat y as a list of columns (legacy behavior)
+                y_cols = y if isinstance(y, list) else [y]
+                data = dask_df[[x] + y_cols].dropna().compute()
+                x_vals = data[x].tolist()
+                area_series = {}
+                for y_col in y_cols:
+                    y_vals = data[y_col].tolist()
+                    if len(x_vals) > max_points:
+                        step = max(1, len(x_vals) // max_points)
+                        x_vals_ds = x_vals[::step]
+                        y_vals_ds = y_vals[::step]
+                    else:
+                        x_vals_ds = x_vals
+                        y_vals_ds = y_vals
+                    area_series[y_col] = [{"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals_ds, y_vals_ds)]
+                return {
+                    "type": "area",
+                    "series": area_series,
+                    "title": title or f"Area chart of {y} by {x}",
+                    "x": x,
+                    "y": y,
+                    "sampled": True,
+                    "original_size": original_size,
+                    "out_of_core": "dask"
+                }
+    elif polars_used:
+        print(f"Using Polars for out-of-core processing: {original_size:,} rows.")
+        import polars as pl
+        if plot_type == "heatmap" and x and y:
+            if column:
+                pivot = polars_df.pivot(values=column, index=y, columns=x, aggregate_fn="sum").to_pandas()
+                title_default = f"Heatmap of {column} by {y} vs {x}"
+            else:
+                # Fallback to counting occurrences
+                temp = polars_df.groupby([y, x]).count().to_pandas()
+                pivot = temp.pivot(index=y, columns=x, values="count")
+                title_default = f"Heatmap count of {y} vs {x}"
+            if len(pivot.columns) > max_points:
+                pivot = pivot.iloc[:, :max_points]
+            if len(pivot.index) > max_points:
+                pivot = pivot.iloc[:max_points, :]
+            return {
+                "type": "heatmap",
+                "x": list(pivot.columns),
+                "y": list(pivot.index),
+                "z": pivot.values.tolist(),
+                "title": title or title_default,
+                "aggregated_column": column if column else None,
+                "sampled": True,
+                "original_size": original_size,
+                "out_of_core": "polars"
+            }
+        elif plot_type == "area" and x and y:
+            split_column = column if column and column in polars_df.columns else None
+            if split_column:
+                grouped = polars_df.drop_nulls().groupby([x, split_column]).agg([pl.col(y).sum()]).to_pandas()
+                area_series = {}
+                for series_name in grouped[split_column].unique():
+                    series_data = grouped[grouped[split_column] == series_name]
+                    x_vals = series_data[x].tolist()
+                    y_vals = series_data[y].tolist()
+                    if len(x_vals) > max_points:
+                        step = max(1, len(x_vals) // max_points)
+                        x_vals = x_vals[::step]
+                        y_vals = y_vals[::step]
+                    area_series[str(series_name)] = [
+                        {"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals, y_vals)
+                    ]
+                return {
+                    "type": "area",
+                    "series": area_series,
+                    "title": title or f"Area chart of {y} by {x} per {split_column}",
+                    "x": x,
+                    "y": y,
+                    "series_column": split_column,
+                    "sampled": True,
+                    "original_size": original_size,
+                    "out_of_core": "polars"
+                }
+            else:
+                y_cols = y if isinstance(y, list) else [y]
+                data = polars_df.select([x] + y_cols).drop_nulls().to_pandas()
+                x_vals = data[x].tolist()
+                area_series = {}
+                for y_col in y_cols:
+                    y_vals = data[y_col].tolist()
+                    if len(x_vals) > max_points:
+                        step = max(1, len(x_vals) // max_points)
+                        x_vals_ds = x_vals[::step]
+                        y_vals_ds = y_vals[::step]
+                    else:
+                        x_vals_ds = x_vals
+                        y_vals_ds = y_vals
+                    area_series[y_col] = [{"x": str(xv), "y": float(yv)} for xv, yv in zip(x_vals_ds, y_vals_ds)]
+                return {
+                    "type": "area",
+                    "series": area_series,
+                    "title": title or f"Area chart of {y} by {x}",
+                    "x": x,
+                    "y": y,
+                    "sampled": True,
+                    "original_size": original_size,
+                    "out_of_core": "polars"
+                }
+    # If not using Dask/Polars, fallback to pandas and sample as before
+    if original_size > effective_max_processing_rows:
+        print(f"Dataset large ({original_size:,} rows). Sampling {effective_max_processing_rows:,} rows for processing...")
         # Use systematic sampling to preserve patterns
-        step = max(1, original_size // max_processing_rows)
+        step = max(1, original_size // effective_max_processing_rows)
         df = df.iloc[::step].copy()
     
     if plot_type == "stacked_bar" and x and y:
@@ -576,7 +764,45 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             "original_size": original_size
         }
     elif plot_type == "heatmap" and x and y:
-        # Check if there's a third column to aggregate, otherwise count
+        # If both x and y are numeric, do a 2D histogram (numeric heatmap)
+        if pd.api.types.is_numeric_dtype(df[x]) and pd.api.types.is_numeric_dtype(df[y]):
+            # 2D histogram binning
+            x_vals = df[x].dropna()
+            y_vals = df[y].dropna()
+            # Use only overlapping indices
+            valid_idx = x_vals.index.intersection(y_vals.index)
+            x_vals = x_vals.loc[valid_idx]
+            y_vals = y_vals.loc[valid_idx]
+            # Downsample if too large
+            if len(x_vals) > max_processing_rows:
+                step = max(1, len(x_vals) // max_processing_rows)
+                x_vals = x_vals[::step]
+                y_vals = y_vals[::step]
+            import numpy as np
+            counts, xedges, yedges = np.histogram2d(x_vals, y_vals, bins=bins)
+            # Convert bin edges to bin centers for axes
+            x_centers = 0.5 * (xedges[:-1] + xedges[1:])
+            y_centers = 0.5 * (yedges[:-1] + yedges[1:])
+            # Limit axes if too many bins
+            if len(x_centers) > max_points:
+                x_centers = x_centers[:max_points]
+                counts = counts[:max_points, :]
+            if len(y_centers) > max_points:
+                y_centers = y_centers[:max_points]
+                counts = counts[:, :max_points]
+            return {
+                "type": "heatmap",
+                "x": [float(xc) for xc in x_centers],
+                "y": [float(yc) for yc in y_centers],
+                "z": counts.T.tolist(),  # transpose so z[i][j] is value at (x[i], y[j])
+                "title": title or f"2D Histogram Heatmap of {x} vs {y}",
+                "x_label": x,
+                "y_label": y,
+                "sampled": original_size > max_processing_rows,
+                "original_size": original_size,
+                "numeric_heatmap": True
+            }
+        # Otherwise, use categorical/categorical or categorical/numeric pivot as before
         if column:
             # Use the specified column as values to aggregate
             pivot = pd.pivot_table(df, index=y, columns=x, values=column, aggfunc="sum", fill_value=0)
@@ -585,13 +811,11 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
             # Fallback to counting occurrences
             pivot = pd.pivot_table(df, index=y, columns=x, aggfunc="size", fill_value=0)
             title_default = f"Heatmap count of {y} vs {x}"
-        
         # Limit heatmap dimensions to prevent overwhelming output
         if len(pivot.columns) > max_points:
             pivot = pivot.iloc[:, :max_points]
         if len(pivot.index) > max_points:
             pivot = pivot.iloc[:max_points, :]
-        
         return {
             "type": "heatmap",
             "x": list(pivot.columns),
