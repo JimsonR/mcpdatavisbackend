@@ -1,5 +1,3 @@
-
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastmcp import Client
@@ -441,6 +439,140 @@ async def llm_agent_detailed_formatted(req: ChatRequest):
         }
 
 
+@app.post("/llm/structured-agent")
+async def llm_structured_agent(req: ChatRequest):
+    """
+    Chat endpoint using the enhanced StructuredAgent with structured response formatting.
+    This endpoint provides better error handling, contextual tool execution display,
+    and Claude-like response formatting.
+    """
+    servers = get_mcp_servers()
+    
+    # Safety check: ensure we have servers configured
+    if not servers:
+        return {
+            "response": "No MCP servers configured.", 
+            "error": True,
+            "tool_executions": [],
+            "reasoning_steps": [],
+            "formatted_output": "No MCP servers configured.",
+            "agent_type": "structured"
+        }
+    
+    try:
+        # Filter out unreachable servers
+        reachable_servers = {}
+        for server_name, server_config in servers.items():
+            try:
+                async with Client(server_config["url"]) as client:
+                    await client.list_tools()
+                    reachable_servers[server_name] = server_config
+            except Exception as e:
+                print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
+                continue
+        
+        if not reachable_servers:
+            return {
+                "response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", 
+                "error": True,
+                "tool_executions": [],
+                "reasoning_steps": [],
+                "formatted_output": "No MCP servers are currently reachable. Please check if your MCP servers are running.",
+                "agent_type": "structured"
+            }
+        
+        print(f"Using {len(reachable_servers)} reachable servers: {list(reachable_servers.keys())}")
+        
+        client = MultiServerMCPClient(reachable_servers)
+        tools = await client.get_tools()
+        
+        if not tools:
+            return {
+                "response": "No tools available from reachable MCP servers.", 
+                "error": True,
+                "tool_executions": [],
+                "reasoning_steps": [],
+                "formatted_output": "No tools available from reachable MCP servers.",
+                "agent_type": "structured"
+            }
+        
+        # Initialize the enhanced agent
+        agent = StructuredAgent(llm, tools)
+
+        # Build message list: history + new message with context management
+        messages = []
+        if req.history:
+            recent_history = req.history[-10:] if len(req.history) > 10 else req.history
+            for m in recent_history:
+                if m["role"] == "user":
+                    messages.append(HumanMessage(content=m["content"]))
+                elif m["role"] == "assistant":
+                    from langchain_core.messages import AIMessage
+                    messages.append(AIMessage(content=m["content"]))
+        messages.append(HumanMessage(content=req.message))
+
+        # Use the enhanced invoke method
+        result = await agent.invoke(messages)
+        
+        # Extract reasoning steps for detailed breakdown
+        reasoning_steps = result.get("reasoning_steps", [])
+        
+        # Format tool executions in the expected format (for backward compatibility)
+        tool_executions = []
+        for step in reasoning_steps:
+            for tool_result in step.get("tool_results", []):
+                tool_executions.append({
+                    "tool_name": tool_result["tool_name"],
+                    "arguments": tool_result["arguments"],
+                    "result": tool_result["result"][:500] + "..." if len(str(tool_result["result"])) > 500 else tool_result["result"]
+                })
+
+        return {
+            "response": result.get("response"),
+            "formatted_output": result.get("formatted_output"),  # New: Claude-like structured response
+            "reasoning_steps": reasoning_steps,  # New: Step-by-step breakdown
+            "tool_executions": tool_executions,  # Backward compatibility
+            "iterations": result.get("iterations"),
+            "messages": [getattr(m, "content", str(m)) for m in result.get("messages", [])] if "messages" in result else [],
+            "success": True,
+            "error": False,
+            "agent_type": "structured"
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Structured agent error: {error_msg}")
+        return {
+            "response": f"Structured agent error: {error_msg}", 
+            "formatted_output": f"Structured agent error: {error_msg}",
+            "error": True,
+            "error_type": type(e).__name__,
+            "tool_executions": [],
+            "reasoning_steps": [],
+            "iterations": 0,
+            "agent_type": "structured"
+        }
+
+
+# Optional: Add a new endpoint specifically for the formatted output
+@app.post("/llm/structured-agent-formatted")
+async def llm_structured_agent_formatted(req: ChatRequest):
+    """
+    Alternative endpoint that returns just the formatted output for direct display.
+    This is useful if you want to display the response exactly like Claude does.
+    """
+    result = await llm_structured_agent(req)
+    
+    if result.get("error"):
+        return {"formatted_response": result["response"], "error": True}
+    
+    return {
+        "formatted_response": result.get("formatted_output", result["response"]),
+        "error": False,
+        "iterations": result.get("iterations", 0),
+        "tool_count": len(result.get("tool_executions", []))
+    }
+
 # --- Optimized: Only check reachable servers when explicitly requested ---
 @app.get("/langchain/list-tools")
 async def langchain_list_tools(servers: str = None, only_reachable: bool = False):
@@ -517,6 +649,77 @@ def delete_mcp_server(name: str):
     del servers[name]
     save_mcp_servers(servers)
     return {"message": f"Server '{name}' deleted.", "servers": servers}
+
+# --- Debug endpoint for tool schemas ---
+@app.get("/debug/tool-schemas")
+async def debug_tool_schemas():
+    """Debug endpoint to inspect MCP tool schemas"""
+    servers = get_mcp_servers()
+    
+    if not servers:
+        return {"error": "No MCP servers configured"}
+    
+    try:
+        # Get reachable servers
+        reachable_servers = {}
+        for server_name, server_config in servers.items():
+            try:
+                async with Client(server_config["url"]) as client:
+                    await client.list_tools()
+                    reachable_servers[server_name] = server_config
+            except Exception as e:
+                print(f"Warning: MCP server '{server_name}' unreachable: {e}")
+                continue
+        
+        if not reachable_servers:
+            return {"error": "No reachable MCP servers"}
+        
+        client = MultiServerMCPClient(reachable_servers)
+        tools = await client.get_tools()
+        
+        # Create debug agent to inspect schemas
+        from agent.custom_agent import StructuredAgent
+        agent = StructuredAgent(llm, tools)
+        debug_info = agent.debug_tool_schemas()
+        
+        return {
+            "reachable_servers": list(reachable_servers.keys()),
+            "tool_count": len(tools),
+            "tool_schemas": debug_info
+        }
+        
+    except Exception as e:
+        return {"error": f"Debug error: {str(e)}"}
+
+@app.get("/debug/tool-example/{tool_name}")
+async def get_tool_example(tool_name: str):
+    """Get usage example for a specific tool"""
+    servers = get_mcp_servers()
+    
+    try:
+        reachable_servers = {}
+        for server_name, server_config in servers.items():
+            try:
+                async with Client(server_config["url"]) as client:
+                    await client.list_tools()
+                    reachable_servers[server_name] = server_config
+            except Exception:
+                continue
+        
+        if not reachable_servers:
+            return {"error": "No reachable MCP servers"}
+        
+        client = MultiServerMCPClient(reachable_servers)
+        tools = await client.get_tools()
+        
+        from agent.custom_agent import StructuredAgent
+        agent = StructuredAgent(llm, tools)
+        example = agent.get_tool_usage_example(tool_name)
+        
+        return {"example": example}
+        
+    except Exception as e:
+        return {"error": f"Error: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn

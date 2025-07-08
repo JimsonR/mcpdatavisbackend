@@ -238,7 +238,7 @@ def list_dataframes() -> list:
 #     except Exception as e:
 #         return [TextContent(type="text", text=f"Error creating chart: {str(e)}")]
 
-@mcp.tool()
+
 
 # --- Improved modular visualization tool ---
 class CreateVisualizationArgs(BaseModel):
@@ -612,9 +612,8 @@ class CreateVisualizationArgs(BaseModel):
 #         return {"error": "Supported: histogram (column), line (column or x/y), bar (x, y), stacked_bar (x, y[list]), pie (column), area (x, y), scatter (x, y), heatmap (x, y), boxplot (y)"}
 
 
-@mcp.tool()
+# @mcp.tool()
 def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, bins=20, max_points=100, max_processing_rows=500000):
-    global np
     """
     Extract plot data from DataFrame with intelligent sampling for large datasets.
     
@@ -627,6 +626,7 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
         max_points: Maximum points in final output
         max_processing_rows: Maximum rows to process before sampling
     """
+    global np
     import numpy as np
     import pandas as pd
     # Lower threshold for area/complex charts
