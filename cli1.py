@@ -14,6 +14,8 @@ from langgraph.prebuilt import create_react_agent
 import yaml
 from threading import Lock
 
+from agent.custom_agent import StructuredAgent
+
 
 load_dotenv(".env")
 
@@ -354,6 +356,83 @@ async def llm_agent_detailed(req: ChatRequest):
                 "tool_executions": [],
                 "full_conversation": []
             }
+        return {
+            "response": f"Agent error: {error_msg}", 
+            "error": True,
+            "tool_executions": [],
+            "full_conversation": []
+        }
+
+# Updated endpoint
+@app.post("/llm/agent-detailed-formatted")
+async def llm_agent_detailed_formatted(req: ChatRequest):
+    servers = get_mcp_servers()
+    
+    if not servers:
+        return {
+            "response": "No MCP servers configured.", 
+            "error": True,
+            "tool_executions": [],
+            "full_conversation": []
+        }
+    
+    try:
+        # Filter reachable servers
+        reachable_servers = {}
+        for server_name, server_config in servers.items():
+            try:
+                async with Client(server_config["url"]) as client:
+                    await client.list_tools()
+                    reachable_servers[server_name] = server_config
+            except Exception as e:
+                print(f"Warning: MCP server '{server_name}' unreachable: {e}")
+                continue
+        
+        if not reachable_servers:
+            return {
+                "response": "No MCP servers are currently reachable.", 
+                "error": True,
+                "tool_executions": [],
+                "full_conversation": []
+            }
+        
+        client = MultiServerMCPClient(reachable_servers)
+        tools = await client.get_tools()
+        
+        if not tools:
+            return {
+                "response": "No tools available from reachable MCP servers.", 
+                "error": True,
+                "tool_executions": [],
+                "full_conversation": []
+            }
+        
+        # Use structured agent
+        agent = StructuredAgent(llm, tools)
+        
+        # Build messages
+        messages = []
+        if req.history:
+            recent_history = req.history[-10:] if len(req.history) > 10 else req.history
+            for m in recent_history:
+                if m["role"] == "user":
+                    messages.append(HumanMessage(content=m["content"]))
+                elif m["role"] == "assistant":
+                    messages.append(AIMessage(content=m["content"]))
+        messages.append(HumanMessage(content=req.message))
+        
+        # Process request
+        result = await agent.process_request(messages)
+        
+        return {
+            "response": result["response"],
+            "tool_executions": result["tool_executions"],
+            "full_conversation": []
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Agent error: {error_msg}")
         return {
             "response": f"Agent error: {error_msg}", 
             "error": True,

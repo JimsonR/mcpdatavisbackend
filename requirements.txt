@@ -2,3 +2,14 @@ langchain-groq
 langchain-mcp-adapters
 mcp
 langgraph
+fastapi
+uvicorn
+python-dotenv
+pyyaml
+langchain
+langchain-openai
+fastmcp
+dask[dataframe]
+polars
+numpy
+pandas
