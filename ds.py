@@ -614,10 +614,11 @@ class CreateVisualizationArgs(BaseModel):
 
 @mcp.tool()
 def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, bins=20, max_points=100, max_processing_rows=500000):
+    global np
     """
     Extract plot data from DataFrame with intelligent sampling for large datasets.
     
-    Args:
+    Args:                                                  
         df: DataFrame to extract data from
         plot_type: Type of plot to generate
         x, y, column: Column names for plotting
