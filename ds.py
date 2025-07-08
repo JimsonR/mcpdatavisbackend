@@ -58,47 +58,68 @@ def run_script(args: RunScriptArgs) -> list:
     Do list_dataframes before using this tool to ensure you know the available DataFrames and their columns.
     This tool allows you to run scripts that can analyze, process, and visualize data using pandas."""
     global _dataframes, _notes
+    if not hasattr(run_script, "_memory"):
+        run_script._memory = {}
+    memory = run_script._memory
     script = args.script
     save_to_memory = args.save_to_memory
-    
     # Basic validation
     if 'pd.read_csv(' in script:
         return [TextContent(type="text", text="ERROR: Use load_csv tool instead of pd.read_csv()")]
-    
     if any(pattern in script for pattern in ['import matplotlib', 'plt.show(', 'plt.figure(']):
         return [TextContent(type="text", text="ERROR: Use DataFrame.plot() methods instead of matplotlib")]
-    
-    # Execute script
-    local_dict = {**_dataframes}
-    
+    # If script is a single variable name, try to return from memory
+    if isinstance(script, str) and script.strip() in memory and (not ("\n" in script or ";" in script)):
+        val = memory[script.strip()]
+        return [TextContent(type="text", text=repr(val))]
+    # Prepare execution context
+    local_vars = {**_dataframes, **memory}
+    import sys
+    import io
+    import traceback
+    stdout = io.StringIO()
+    result = None
     try:
-        import sys
-        from io import StringIO
-        
-        # Capture output
-        old_stdout = sys.stdout
-        sys.stdout = captured_output = StringIO()
-        
-        # Execute
-        exec(script, {'pd': pd, 'np': np}, local_dict)
-        
-        # Get output
-        output = captured_output.getvalue()
-        
+        # Split script into lines, try to eval last line if possible
+        lines = script.strip().split("\n")
+        # Remove empty lines at end
+        while lines and not lines[-1].strip():
+            lines.pop()
+        last_line = lines[-1] if lines else ""
+        body = "\n".join(lines[:-1])
+        # Redirect stdout
+        sys_stdout = sys.stdout
+        sys.stdout = stdout
+        # Execute all but last line
+        if body.strip():
+            exec(body, {'pd': pd, 'np': np}, local_vars)
+        # Try to eval last line
+        try:
+            result = eval(last_line, {'pd': pd, 'np': np}, local_vars)
+        except Exception:
+            # If eval fails, exec last line
+            exec(last_line, {'pd': pd, 'np': np}, local_vars)
+            result = None
+        # Save to memory if requested
+        if save_to_memory:
+            for name in save_to_memory:
+                if name in local_vars:
+                    memory[name] = local_vars[name]
+                elif name in locals():
+                    memory[name] = locals()[name]
+        # If result is None, but stdout has output, return that
+        output_text = stdout.getvalue().strip()
+        if result is not None:
+            output = repr(result)
+        elif output_text:
+            output = output_text
+        else:
+            output = "Script executed successfully (no output)"
     except Exception as e:
-        output = f"Error: {str(e)}"
+        tb = traceback.format_exc()
+        output = f"Error: {str(e)}\n{tb}"
     finally:
-        sys.stdout = old_stdout
-    
-    # Save to memory if requested
-    if save_to_memory:
-        for df_name in save_to_memory:
-            if df_name in local_dict:
-                _dataframes[df_name] = local_dict[df_name]
-    
-    if not output.strip():
-        output = "Script executed successfully (no output)"
-    
+        sys.stdout = sys_stdout
     _notes.append(f"Script executed: {output[:100]}...")
     return [TextContent(type="text", text=output)]
 
