@@ -618,7 +618,7 @@ def _extract_plot_data(df, plot_type, x=None, y=None, column=None, title=None, b
     """
     Extract plot data from DataFrame with intelligent sampling for large datasets.
     
-    Args:                                                  
+    Args:
         df: DataFrame to extract data from
         plot_type: Type of plot to generate
         x, y, column: Column names for plotting
