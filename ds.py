@@ -87,26 +87,36 @@ def run_script(args: RunScriptArgs) -> list:
             lines.pop()
         last_line = lines[-1] if lines else ""
         body = "\n".join(lines[:-1])
+        # Prepare globals for exec/eval: include builtins, pd, np
+        exec_globals = globals().copy()
+        exec_globals.update({'pd': pd, 'np': np})
         # Redirect stdout
         sys_stdout = sys.stdout
         sys.stdout = stdout
         # Execute all but last line
         if body.strip():
-            exec(body, {'pd': pd, 'np': np}, local_vars)
+            exec(body, exec_globals, local_vars)
         # Try to eval last line
         try:
-            result = eval(last_line, {'pd': pd, 'np': np}, local_vars)
+            result = eval(last_line, exec_globals, local_vars)
         except Exception:
             # If eval fails, exec last line
-            exec(last_line, {'pd': pd, 'np': np}, local_vars)
+            exec(last_line, exec_globals, local_vars)
             result = None
         # Save to memory if requested
         if save_to_memory:
             for name in save_to_memory:
+                val = None
                 if name in local_vars:
-                    memory[name] = local_vars[name]
+                    val = local_vars[name]
                 elif name in locals():
-                    memory[name] = locals()[name]
+                    val = locals()[name]
+                if val is not None:
+                    memory[name] = val
+                    # If it's a DataFrame or Series, also add to _dataframes
+                    import pandas as pd
+                    if isinstance(val, (pd.DataFrame, pd.Series)):
+                        _dataframes[name] = val
         # If result is None, but stdout has output, return that
         output_text = stdout.getvalue().strip()
         if result is not None:
