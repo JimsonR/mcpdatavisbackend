@@ -44,6 +44,13 @@ def save_mcp_servers(servers):
 # In-memory cache of servers (reload on every change)
 _cached_servers = None
 _cached_servers_mtime = None
+
+# Cache for server reachability status (expires after 60 seconds)
+_server_health_cache = {}
+_health_cache_timeout = 60  # seconds
+
+import time
+
 def get_mcp_servers():
     global _cached_servers, _cached_servers_mtime
     try:
@@ -54,6 +61,42 @@ def get_mcp_servers():
         _cached_servers = load_mcp_servers()
         _cached_servers_mtime = mtime
     return _cached_servers
+
+async def check_server_health(server_name: str, server_config: dict) -> bool:
+    """Check if a server is reachable, with caching to avoid repeated checks."""
+    current_time = time.time()
+    cache_key = f"{server_name}_{server_config['url']}"
+    
+    # Check cache first
+    if cache_key in _server_health_cache:
+        cached_result, timestamp = _server_health_cache[cache_key]
+        if current_time - timestamp < _health_cache_timeout:
+            return cached_result
+    
+    # Perform health check
+    try:
+        async with Client(server_config["url"]) as client:
+            await client.list_tools()
+            _server_health_cache[cache_key] = (True, current_time)
+            return True
+    except Exception:
+        _server_health_cache[cache_key] = (False, current_time)
+        return False
+
+async def get_reachable_servers(servers: dict, skip_health_check: bool = False) -> dict:
+    """Get reachable servers, with option to skip health checks for faster responses."""
+    if skip_health_check:
+        # Return all servers without checking - much faster
+        return servers
+    
+    reachable_servers = {}
+    for server_name, server_config in servers.items():
+        if await check_server_health(server_name, server_config):
+            reachable_servers[server_name] = server_config
+        else:
+            print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable")
+    
+    return reachable_servers
 
 # For backward compatibility, fallback to hardcoded if YAML missing
 def get_server_cfg(server):
@@ -188,29 +231,27 @@ async def llm_agent(req: ChatRequest):
         return {"response": "No MCP servers configured.", "error": True}
     
     try:
-        # Filter out unreachable servers
-        reachable_servers = {}
-        for server_name, server_config in servers.items():
-            try:
-                # Quick health check for each server
-                async with Client(server_config["url"]) as client:
-                    await client.list_tools()  # Test if server is reachable
-                    reachable_servers[server_name] = server_config
-            except Exception as e:
-                print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
-                continue
+        # Skip health checks for faster response
+        reachable_servers = await get_reachable_servers(servers, skip_health_check=True)
         
         if not reachable_servers:
-            return {"response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", "error": True}
+            return {"response": "No MCP servers configured.", "error": True}
         
-        print(f"Using {len(reachable_servers)} reachable servers: {list(reachable_servers.keys())}")
+        print(f"Using {len(reachable_servers)} servers: {list(reachable_servers.keys())}")
         
         client = MultiServerMCPClient(reachable_servers)
         tools = await client.get_tools()
         
         # Safety check: ensure we have tools
         if not tools:
-            return {"response": "No tools available from reachable MCP servers.", "error": True}
+            # If no tools, try fallback with health check
+            reachable_servers = await get_reachable_servers(servers, skip_health_check=False)
+            if not reachable_servers:
+                return {"response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", "error": True}
+            client = MultiServerMCPClient(reachable_servers)
+            tools = await client.get_tools()
+            if not tools:
+                return {"response": "No tools available from reachable MCP servers.", "error": True}
         
         agent = create_react_agent(llm, tools)
         
@@ -258,30 +299,36 @@ async def llm_agent_detailed(req: ChatRequest):
         }
     
     try:
-        # Filter out unreachable servers
-        reachable_servers = {}
-        for server_name, server_config in servers.items():
-            try:
-                # Quick health check for each server
-                async with Client(server_config["url"]) as client:
-                    await client.list_tools()  # Test if server is reachable
-                    reachable_servers[server_name] = server_config
-            except Exception as e:
-                print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
-                continue
+        # Skip health checks for faster response
+        reachable_servers = await get_reachable_servers(servers, skip_health_check=True)
         
         if not reachable_servers:
             return {
-                "response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", 
+                "response": "No MCP servers configured.", 
                 "error": True,
                 "tool_executions": [],
                 "full_conversation": []
             }
         
-        print(f"Using {len(reachable_servers)} reachable servers: {list(reachable_servers.keys())}")
+        print(f"Using {len(reachable_servers)} servers: {list(reachable_servers.keys())}")
         
         client = MultiServerMCPClient(reachable_servers)
-        tools = await client.get_tools()
+        
+        # Try to get tools with fallback
+        try:
+            tools = await client.get_tools()
+        except Exception:
+            # Fallback with health check
+            reachable_servers = await get_reachable_servers(servers, skip_health_check=False)
+            if not reachable_servers:
+                return {
+                    "response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", 
+                    "error": True,
+                    "tool_executions": [],
+                    "full_conversation": []
+                }
+            client = MultiServerMCPClient(reachable_servers)
+            tools = await client.get_tools()
         
         # Safety check: ensure we have tools
         if not tools:
@@ -375,27 +422,34 @@ async def llm_agent_detailed_formatted(req: ChatRequest):
         }
     
     try:
-        # Filter reachable servers
-        reachable_servers = {}
-        for server_name, server_config in servers.items():
-            try:
-                async with Client(server_config["url"]) as client:
-                    await client.list_tools()
-                    reachable_servers[server_name] = server_config
-            except Exception as e:
-                print(f"Warning: MCP server '{server_name}' unreachable: {e}")
-                continue
+        # Skip health checks for faster response
+        reachable_servers = await get_reachable_servers(servers, skip_health_check=True)
         
         if not reachable_servers:
             return {
-                "response": "No MCP servers are currently reachable.", 
+                "response": "No MCP servers configured.", 
                 "error": True,
                 "tool_executions": [],
                 "full_conversation": []
             }
         
         client = MultiServerMCPClient(reachable_servers)
-        tools = await client.get_tools()
+        
+        # Try to get tools with fallback
+        try:
+            tools = await client.get_tools()
+        except Exception:
+            # Fallback with health check
+            reachable_servers = await get_reachable_servers(servers, skip_health_check=False)
+            if not reachable_servers:
+                return {
+                    "response": "No MCP servers are currently reachable.", 
+                    "error": True,
+                    "tool_executions": [],
+                    "full_conversation": []
+                }
+            client = MultiServerMCPClient(reachable_servers)
+            tools = await client.get_tools()
         
         if not tools:
             return {
@@ -460,31 +514,41 @@ async def llm_structured_agent(req: ChatRequest):
         }
     
     try:
-        # Filter out unreachable servers
-        reachable_servers = {}
-        for server_name, server_config in servers.items():
-            try:
-                async with Client(server_config["url"]) as client:
-                    await client.list_tools()
-                    reachable_servers[server_name] = server_config
-            except Exception as e:
-                print(f"Warning: MCP server '{server_name}' at {server_config['url']} is unreachable: {e}")
-                continue
+        # Skip health checks for faster initial response - servers will fail gracefully if unreachable
+        reachable_servers = await get_reachable_servers(servers, skip_health_check=True)
         
         if not reachable_servers:
             return {
-                "response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", 
+                "response": "No MCP servers configured.", 
                 "error": True,
                 "tool_executions": [],
                 "reasoning_steps": [],
-                "formatted_output": "No MCP servers are currently reachable. Please check if your MCP servers are running.",
+                "formatted_output": "No MCP servers configured.",
                 "agent_type": "structured"
             }
         
-        print(f"Using {len(reachable_servers)} reachable servers: {list(reachable_servers.keys())}")
+        print(f"Using {len(reachable_servers)} servers: {list(reachable_servers.keys())}")
         
         client = MultiServerMCPClient(reachable_servers)
-        tools = await client.get_tools()
+        
+        # Try to get tools - if any servers are unreachable, this will filter them out
+        try:
+            tools = await client.get_tools()
+        except Exception as e:
+            print(f"Error getting tools, falling back to health check: {e}")
+            # Fallback: do health checks if getting tools fails
+            reachable_servers = await get_reachable_servers(servers, skip_health_check=False)
+            if not reachable_servers:
+                return {
+                    "response": "No MCP servers are currently reachable. Please check if your MCP servers are running.", 
+                    "error": True,
+                    "tool_executions": [],
+                    "reasoning_steps": [],
+                    "formatted_output": "No MCP servers are currently reachable. Please check if your MCP servers are running.",
+                    "agent_type": "structured"
+                }
+            client = MultiServerMCPClient(reachable_servers)
+            tools = await client.get_tools()
         
         if not tools:
             return {
@@ -497,6 +561,8 @@ async def llm_structured_agent(req: ChatRequest):
             }
         
         # Initialize the enhanced agent
+               # --- Groq LLM setup ---
+    
         agent = StructuredAgent(llm, tools)
 
         # Build message list: history + new message with context management
@@ -572,6 +638,117 @@ async def llm_structured_agent_formatted(req: ChatRequest):
         "iterations": result.get("iterations", 0),
         "tool_count": len(result.get("tool_executions", []))
     }
+
+
+
+# --- Groq LLM integration for testing ---
+from langchain_groq import ChatGroq
+
+@app.post("/llm/groq-structured-agent")
+async def groq_structured_agent(req: ChatRequest):
+    """
+    Chat endpoint using StructuredAgent with Groq LLM for testing.
+    """
+    servers = get_mcp_servers()
+    if not servers:
+        return {
+            "response": "No MCP servers configured.",
+            "error": True,
+            "tool_executions": [],
+            "reasoning_steps": [],
+            "formatted_output": "No MCP servers configured.",
+            "agent_type": "structured-groq"
+        }
+    try:
+        reachable_servers = await get_reachable_servers(servers, skip_health_check=True)
+        if not reachable_servers:
+            return {
+                "response": "No MCP servers configured.",
+                "error": True,
+                "tool_executions": [],
+                "reasoning_steps": [],
+                "formatted_output": "No MCP servers configured.",
+                "agent_type": "structured-groq"
+            }
+        print(f"Using {len(reachable_servers)} servers: {list(reachable_servers.keys())}")
+        client = MultiServerMCPClient(reachable_servers)
+        try:
+            tools = await client.get_tools()
+        except Exception as e:
+            print(f"Error getting tools, falling back to health check: {e}")
+            reachable_servers = await get_reachable_servers(servers, skip_health_check=False)
+            if not reachable_servers:
+                return {
+                    "response": "No MCP servers are currently reachable. Please check if your MCP servers are running.",
+                    "error": True,
+                    "tool_executions": [],
+                    "reasoning_steps": [],
+                    "formatted_output": "No MCP servers are currently reachable. Please check if your MCP servers are running.",
+                    "agent_type": "structured-groq"
+                }
+            client = MultiServerMCPClient(reachable_servers)
+            tools = await client.get_tools()
+        if not tools:
+            return {
+                "response": "No tools available from reachable MCP servers.",
+                "error": True,
+                "tool_executions": [],
+                "reasoning_steps": [],
+                "formatted_output": "No tools available from reachable MCP servers.",
+                "agent_type": "structured-groq"
+            }
+        # --- Groq LLM setup ---
+        groq_llm = ChatGroq(
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+            model=os.getenv("GROQ_MODEL", "qwen-qwq-32b"),
+        )
+        agent = StructuredAgent(groq_llm, tools)
+        messages = []
+        if req.history:
+            recent_history = req.history[-10:] if len(req.history) > 10 else req.history
+            for m in recent_history:
+                if m["role"] == "user":
+                    messages.append(HumanMessage(content=m["content"]))
+                elif m["role"] == "assistant":
+                    from langchain_core.messages import AIMessage
+                    messages.append(AIMessage(content=m["content"]))
+        messages.append(HumanMessage(content=req.message))
+        result = await agent.invoke(messages)
+        reasoning_steps = result.get("reasoning_steps", [])
+        tool_executions = []
+        for step in reasoning_steps:
+            for tool_result in step.get("tool_results", []):
+                tool_executions.append({
+                    "tool_name": tool_result["tool_name"],
+                    "arguments": tool_result["arguments"],
+                    "result": tool_result["result"][:500] + "..." if len(str(tool_result["result"])) > 500 else tool_result["result"]
+                })
+        return {
+            "response": result.get("response"),
+            "formatted_output": result.get("formatted_output"),
+            "reasoning_steps": reasoning_steps,
+            "tool_executions": tool_executions,
+            "iterations": result.get("iterations"),
+            "messages": [getattr(m, "content", str(m)) for m in result.get("messages", [])] if "messages" in result else [],
+            "success": True,
+            "error": False,
+            "agent_type": "structured-groq"
+        }
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Groq structured agent error: {error_msg}")
+        return {
+            "response": f"Groq structured agent error: {error_msg}",
+            "formatted_output": f"Groq structured agent error: {error_msg}",
+            "error": True,
+            "error_type": type(e).__name__,
+            "tool_executions": [],
+            "reasoning_steps": [],
+            "iterations": 0,
+            "agent_type": "structured-groq"
+        }
+
+
 
 # --- Optimized: Only check reachable servers when explicitly requested ---
 @app.get("/langchain/list-tools")
@@ -720,6 +897,50 @@ async def get_tool_example(tool_name: str):
         
     except Exception as e:
         return {"error": f"Error: {str(e)}"}
+
+# --- New endpoint for checking server health on demand ---
+@app.get("/mcp/server-health")
+async def check_mcp_server_health():
+    """Check the health status of all MCP servers. Use this when you need to know which servers are actually reachable."""
+    servers = get_mcp_servers()
+    
+    if not servers:
+        return {"error": "No MCP servers configured", "servers": {}}
+    
+    health_status = {}
+    for server_name, server_config in servers.items():
+        is_healthy = await check_server_health(server_name, server_config)
+        health_status[server_name] = {
+            "url": server_config["url"],
+            "healthy": is_healthy,
+            "status": "reachable" if is_healthy else "unreachable"
+        }
+    
+    reachable_count = sum(1 for status in health_status.values() if status["healthy"])
+    
+    return {
+        "servers": health_status,
+        "total_servers": len(servers),
+        "reachable_servers": reachable_count,
+        "all_healthy": reachable_count == len(servers)
+    }
+
+@app.post("/mcp/clear-health-cache")
+async def clear_health_cache():
+    """Clear the server health cache to force fresh health checks."""
+    global _server_health_cache
+    _server_health_cache.clear()
+    return {"message": "Health cache cleared"}
+
+# --- Quick test endpoint for performance ---
+@app.get("/api/quick-test")
+async def quick_test():
+    """Quick endpoint to test server response time without MCP checks."""
+    return {
+        "status": "ok", 
+        "timestamp": time.time(),
+        "message": "Server is responding quickly"
+    }
 
 if __name__ == "__main__":
     import uvicorn

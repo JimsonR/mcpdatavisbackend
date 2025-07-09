@@ -601,37 +601,47 @@ class StructuredAgent:
         return results
 
     def _format_structured_response(self, reasoning_steps: List[Dict], final_response: str) -> str:
-        """Format the response in a structured, Claude-like manner"""
+        """Format the response with tool results in tags for frontend parsing/rendering."""
+        import json
         formatted_parts = []
-        
+
+
         for step in reasoning_steps:
-            if step['reasoning']:
-                formatted_parts.append(step['reasoning'])
-            
-            if step['tool_calls']:
-                formatted_parts.append("\n")
-                for i, tool_result in enumerate(step['tool_results']):
-                    tool_name = tool_result['tool_name']
-                    args = tool_result['arguments']
-                    result = tool_result['result']
-                    
-                    # Format like Claude's tool calls
-                    formatted_parts.append(f"<tool_call>")
+            # Add reasoning if present
+            if step['reasoning'] and step['reasoning'].strip():
+                formatted_parts.append(step['reasoning'].strip())
+
+            # Always emit tool_call tags for every tool call, even if not executed
+            # Map tool_results by tool_name+args for lookup
+            tool_results_map = {}
+            if step.get('tool_results'):
+                for tool_result in step['tool_results']:
+                    # Always use JSON string for args for matching
+                    args_json = json.dumps(tool_result['arguments'], sort_keys=True, ensure_ascii=False)
+                    key = (tool_result['tool_name'], args_json)
+                    tool_results_map[key] = tool_result['result']
+
+            if step.get('tool_calls'):
+                for tool_call in step['tool_calls']:
+                    tool_name = tool_call['name']
+                    args = tool_call['args']
+                    args_json = json.dumps(args, sort_keys=True, ensure_ascii=False)
+                    key = (tool_name, args_json)
+                    result = tool_results_map.get(key)
+                    formatted_parts.append("<tool_call>")
                     formatted_parts.append(f"<tool_name>{tool_name}</tool_name>")
-                    
-                    # Format arguments
-                    for key, value in args.items():
-                        formatted_parts.append(f"<{key}>{value}</{key}>")
-                    
-                    formatted_parts.append(f"</tool_call>")
-                    
-                    # Add result if available
-                    if result:
-                        formatted_parts.append(f"\n{result}\n")
-        
-        if final_response:
-            formatted_parts.append(f"\n{final_response}")
-        
+                    formatted_parts.append(f"<args>{args_json}</args>")
+                    # Always tag the result, even if empty or None
+                    if result is not None:
+                        formatted_parts.append(f"<tool_result>{result}</tool_result>")
+                    else:
+                        formatted_parts.append(f"<tool_result></tool_result>")
+                    formatted_parts.append("</tool_call>")
+
+        # Add final response if present and not already included
+        if final_response and final_response.strip():
+            formatted_parts.append(final_response.strip())
+
         return '\n'.join(formatted_parts)
 
     def _extract_tool_executions(self, messages: List[BaseMessage]) -> List[Dict]:

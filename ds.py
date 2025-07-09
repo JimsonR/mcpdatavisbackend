@@ -140,12 +140,15 @@ def run_script(args: RunScriptArgs) -> list:
         
         saved_vars = []
         if save_to_memory:
-            for name in save_to_memory:
+            for idx, name in enumerate(save_to_memory):
                 val = None
                 if name in local_vars:
                     val = local_vars[name]
                 elif name in locals():
                     val = locals()[name]
+                # If not found, and this is the first name, and result is a DataFrame, save it
+                elif idx == 0 and isinstance(result, pd.DataFrame):
+                    val = result
                 if val is not None:
                     memory[name] = val
                     saved_vars.append(name)
