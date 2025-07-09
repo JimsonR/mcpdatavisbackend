@@ -700,38 +700,41 @@ async def groq_structured_agent(req: ChatRequest):
             groq_api_key=os.getenv("GROQ_API_KEY"),
             model=os.getenv("GROQ_MODEL", "qwen-qwq-32b"),
         )
-        agent = StructuredAgent(groq_llm, tools)
-        messages = []
-        if req.history:
-            recent_history = req.history[-10:] if len(req.history) > 10 else req.history
-            for m in recent_history:
-                if m["role"] == "user":
-                    messages.append(HumanMessage(content=m["content"]))
-                elif m["role"] == "assistant":
-                    from langchain_core.messages import AIMessage
-                    messages.append(AIMessage(content=m["content"]))
-        messages.append(HumanMessage(content=req.message))
-        result = await agent.invoke(messages)
-        reasoning_steps = result.get("reasoning_steps", [])
-        tool_executions = []
-        for step in reasoning_steps:
-            for tool_result in step.get("tool_results", []):
-                tool_executions.append({
-                    "tool_name": tool_result["tool_name"],
-                    "arguments": tool_result["arguments"],
-                    "result": tool_result["result"][:500] + "..." if len(str(tool_result["result"])) > 500 else tool_result["result"]
-                })
-        return {
-            "response": result.get("response"),
-            "formatted_output": result.get("formatted_output"),
-            "reasoning_steps": reasoning_steps,
-            "tool_executions": tool_executions,
-            "iterations": result.get("iterations"),
-            "messages": [getattr(m, "content", str(m)) for m in result.get("messages", [])] if "messages" in result else [],
-            "success": True,
-            "error": False,
-            "agent_type": "structured-groq"
-        }
+        agent = create_react_agent(groq_llm, tools)
+
+        result = await agent.ainvoke({"messages": [{"role": "user", "content": req.message}]})
+        return result
+    #     messages = []
+    #     if req.history:
+    #         recent_history = req.history[-10:] if len(req.history) > 10 else req.history
+    #         for m in recent_history:
+    #             if m["role"] == "user":
+    #                 messages.append(HumanMessage(content=m["content"]))
+    #             elif m["role"] == "assistant":
+    #                 from langchain_core.messages import AIMessage
+    #                 messages.append(AIMessage(content=m["content"]))
+    #     messages.append(HumanMessage(content=req.message))
+    #     result = await agent.invoke(messages)
+    #     reasoning_steps = result.get("reasoning_steps", [])
+    #     tool_executions = []
+    #     for step in reasoning_steps:
+    #         for tool_result in step.get("tool_results", []):
+    #             tool_executions.append({
+    #                 "tool_name": tool_result["tool_name"],
+    #                 "arguments": tool_result["arguments"],
+    #                 "result": tool_result["result"][:500] + "..." if len(str(tool_result["result"])) > 500 else tool_result["result"]
+    #             })
+    #     return {
+    #         "response": result.get("response"),
+    #         "formatted_output": result.get("formatted_output"),
+    #         "reasoning_steps": reasoning_steps,
+    #         "tool_executions": tool_executions,
+    #         "iterations": result.get("iterations"),
+    #         "messages": [getattr(m, "content", str(m)) for m in result.get("messages", [])] if "messages" in result else [],
+    #         "success": True,
+    #         "error": False,
+    #         "agent_type": "structured-groq"
+    #     }
     except Exception as e:
         error_msg = str(e)
         print(f"Groq structured agent error: {error_msg}")
