@@ -561,8 +561,6 @@ async def llm_structured_agent(req: ChatRequest):
             }
         
         # Initialize the enhanced agent
-               # --- Groq LLM setup ---
-    
         agent = StructuredAgent(llm, tools)
 
         # Build message list: history + new message with context management
